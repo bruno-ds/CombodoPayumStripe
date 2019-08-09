@@ -22,7 +22,6 @@ use Payum\Core\Security\TokenInterface;
 use Payum\Core\Storage\StorageInterface;
 use Stripe\Event;
 use Stripe\Webhook;
-use Symfony\Component\HttpKernel\Exception\BadRequestHttpException;
 
 /**
  * Class NotifyAction
@@ -64,18 +63,20 @@ class NotifyUnsafeAction implements ActionInterface, ApiAwareInterface, GatewayA
         RequestNotSupportedException::assertSupports($this, $request);
 
         $event = $this->obtainStripeEvent();
-        $request = new handleCheckoutCompletedEvent($event, handleCheckoutCompletedEvent::TOKEN_MUST_BE_KEPT);
-        $this->gateway->execute($request);
+        $this->checkStripeEventType($event);
+        $this->handleStripeEvent($event);
     }
 
     
     /**
+     * Accepting null models is not standard, but it is required due to the implementation of the symfony bundle's route `payum_notify_do_unsafe`
      * {@inheritDoc}
      */
     public function supports($request)
     {
         return
-            $request instanceof Notify
+            $request instanceof Notify &&
+            null === $request->getModel()
         ;
     }
 
@@ -87,31 +88,51 @@ class NotifyUnsafeAction implements ActionInterface, ApiAwareInterface, GatewayA
         $this->gateway->execute($httpRequest = new GetHttpRequest());
 
 
-        $endpoint_secret = $this->keys->getEndpointSecretKey();
+        if (empty($_SERVER['HTTP_STRIPE_SIGNATURE'])) {
+            throw new LogicException('The stripe signature is mandatory', 400);
+        }
         $sig_header = $_SERVER['HTTP_STRIPE_SIGNATURE'];
+        $endpoint_secret = $this->keys->getEndpointSecretKey();
         $payload = $httpRequest->content;
         $event = null;
 
         try {
             $tolerance = Webhook::DEFAULT_TOLERANCE;
-            $tolerance = 99999; //TODO: remove this tests value!!!!
+//            $tolerance = 99999; //TODO: remove this tests value!!!!
 
             $event = \Stripe\Webhook::constructEvent($payload, $sig_header, $endpoint_secret, $tolerance);
         } catch (\UnexpectedValueException $e) {
-            throw new BadRequestHttpException('Invalid payload', null, 400);
+            throw new LogicException('Invalid payload', 400);
         } catch (\Stripe\Error\SignatureVerification $e) {
-            throw new BadRequestHttpException('Invalid signature', null, 400);
+            throw new LogicException('Invalid signature', 400);
         }
 
-        // Handle the checkout.session.completed event
-        if ($event->type != 'checkout.session.completed') {
-            throw new BadRequestHttpException(
-                srpintf('Invalid event "%s", only "checkout.session.completed" is supported!', $event->type), null, 400
-            );
-        }
 
         return $event;
     }
 
-    
+    /**
+     * @param $request
+     * @param $event
+     */
+    private function handleStripeEvent(Event $event): void
+    {
+        $request = new handleCheckoutCompletedEvent($event, handleCheckoutCompletedEvent::TOKEN_MUST_BE_KEPT);
+        $this->gateway->execute($request);
+    }
+
+    /**
+     * accept only the checkout.session.completed event
+     * @param Event $event
+     */
+    private function checkStripeEventType(Event $event): void
+    {
+        if ($event->type != 'checkout.session.completed') {
+            throw new LogicException(
+                sprintf('Invalid event "%s", only "checkout.session.completed" is supported!', $event->type), 400
+            );
+        }
+    }
+
+
 }

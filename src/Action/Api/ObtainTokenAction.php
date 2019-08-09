@@ -108,43 +108,53 @@ class ObtainTokenAction implements ActionInterface, GatewayAwareInterface, ApiAw
     {
         Stripe::setApiKey($this->keys->getSecretKey());
 
-        // a note about the url: Payum know only 3 url:
-        // - prepare
-        // - capture : https://github.com/Payum/Payum/blob/master/docs/examples/capture-script.md
-        // - after : https://github.com/Payum/Payum/blob/master/docs/examples/done-script.md
-        // in fact, there is also the possibility of a webhook : https://github.com/Payum/Payum/blob/master/docs/examples/notify-script.md
         $rawUrl = $request->getToken()->getTargetUrl();
-        $query = parse_url($rawUrl, PHP_URL_QUERY);
-        if ('' != $query) {
-            $separator = '&';
-        } else {
-            $separator = '?';
-        }
+        $separator = ObtainTokenAction::computeSeparator($rawUrl);
         $successUrl = "{$rawUrl}{$separator}checkout_status=completed";
 
         $rawUrl = $request->getToken()->getAfterUrl();
+        $separator = ObtainTokenAction::computeSeparator($rawUrl);
+        $cancelUrl  = "{$rawUrl}{$separator}checkout_status=canceled";
+
+        $params = [
+            'success_url' => $successUrl,
+            'cancel_url' => $cancelUrl,
+            'payment_method_types' => ['card'],
+            'submit_type' => Session::SUBMIT_TYPE_PAY,
+            'line_items' => $model['line_items'],
+            'payment_intent_data' => [
+                'metadata' => $model['metadata'] ?? ['payment_id' => $model['id']],
+            ],
+            'client_reference_id' => $request->getToken()->getHash(),
+        ];
+
+        if (isset($model['customer_email'])) {
+            $params['customer_email'] = $model['customer_email'];
+        }
+
+        if (isset($model['payment_intent_data'])) {
+            $params['payment_intent_data'] = array_merge($params['payment_intent_data'], $model['payment_intent_data']);
+        }
+
+        $session = Session::create($params);
+
+        return $session;
+    }
+
+    /**
+     * @param string $rawUrl
+     *
+     * @return string
+     */
+    private static function computeSeparator(string $rawUrl): string
+    {
         $query = parse_url($rawUrl, PHP_URL_QUERY);
         if ('' != $query) {
             $separator = '&';
         } else {
             $separator = '?';
         }
-        $cancelUrl  = "{$rawUrl}{$separator}checkout_status=canceled";
 
-        $session = Session::create(
-            [
-                'success_url'           => $successUrl,
-                'cancel_url'            => $cancelUrl,
-                'payment_method_types'  => ['card'],
-                'submit_type'           => Session::SUBMIT_TYPE_PAY,
-                'line_items'            => $model['line_items'],
-                'payment_intent_data'   => [
-                    'metadata'              => $model['metadata'] ?? ['payment_id' => $model['id']],
-                ],
-                'client_reference_id'   => $request->getToken()->getHash(),
-            ]
-        );
-
-        return $session;
-    }
+        return $separator;
+}
 }

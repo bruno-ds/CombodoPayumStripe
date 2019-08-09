@@ -37,30 +37,31 @@ use Sylius\Component\Core\Model\PaymentInterface as SyliusPaymentInterface;
  *
  * @author Bruno DA SILVA
  */
-class StripeV3RequirementsFulfillerOnCaptureExtensions implements ExtensionInterface
+class StripeV3OnCaptureExtensions implements ExtensionInterface
 {
-    /** @var string  */
-    private $providerName;
-    /**
-     * @var CacheManager
-     */
-    private $cacheManager;
-    /**
-     * @var string
-     */
-    private $liipImagineFilterName;
 
-    public function __construct(string $providerName, CacheManager $cacheManager, string $liipImagineFilterName)
+
+    /**
+     * @var StripeV3LineItemsAppendDetailled
+     */
+    private $detailled;
+    /**
+     * @var StripeV3LineItemsAppendIntoSingleLine
+     */
+    private $singleLine;
+
+    public function __construct(StripeV3LineItemsAppendDetailled $detailled, StripeV3LineItemsAppendIntoSingleLine $singleLine)
     {
-        $this->providerName = $providerName;
-        $this->cacheManager = $cacheManager;
-        $this->liipImagineFilterName = $liipImagineFilterName;
+        $this->detailled = $detailled;
+        $this->singleLine = $singleLine;
     }
 
-    /**
-     * @var Context $context
-     */
     public function onPreExecute(Context $context)
+    {
+        //do nothing
+    }
+
+    public function onPostExecute(Context $context)
     {
         //do nothing
     }
@@ -91,38 +92,11 @@ class StripeV3RequirementsFulfillerOnCaptureExtensions implements ExtensionInter
         /** @var array $paymentDetails */
         $paymentDetails = $payment->getDetails();
 
-//        if (isset($paymentDetails['line_items'])) {
-//            throw new \LogicException('Attempting to initialize an already initialized stripe\'s line_items');
-//        }
-        $paymentDetails['line_items'] = [];
+        $paymentDetails = $this->appendLineItems($paymentDetails, $order);
 
-        /** @var OrderItem $item */
-        foreach ($order->getItems() as $item) {
-            $imageUrl = $this->cacheManager->generateUrl(
-                $item->getProduct()->getImages()->first()->getPath(),
-                $this->liipImagineFilterName
-            );
-            $paymentDetails['line_items'][] = [
-                'name'      => $item->getVariantName(),
-                'amount'    => $item->getUnitPrice(),
-                'currency'  => $order->getCurrencyCode(),
-                'quantity'  => $item->getQuantity(),
-//                'images'    => $item->getProduct()->getImages()->map(function (ImageInterface $image) { return $this->cacheManager->generateUrl($image->getPath(), $this->liipImagineFilterName); })->toArray(),
-                'images'    => [$imageUrl],
-                'description'=> $item->getProduct()->getShortDescription(),
-            ];
-        }
-
+        $paymentDetails = $this->appendCustomerEmail($order, $paymentDetails);
 
         $payment->setDetails($paymentDetails);
-    }
-
-    /**
-     * @var Context $context
-     */
-    public function onPostExecute(Context $context)
-    {
-        //do nothing
     }
 
     public function supports($context)
@@ -134,5 +108,43 @@ class StripeV3RequirementsFulfillerOnCaptureExtensions implements ExtensionInter
             $request instanceof Capture &&
             $request->getModel() instanceof SyliusPaymentInterface
             ;
+    }
+
+    /**
+     * return the payment details completed with the line_items.
+     *
+     * Stripe has a limitation: it cannot handle order level promotions (and it refuses negative amount for the line_items).
+     * So if there are so, the code fallback on the whole order into one single line_items
+     *
+     * @param array $paymentDetails
+     * @param Order $order
+     * @return array
+     */
+    private function appendLineItems(array $paymentDetails, Order $order): array
+    {
+        $orderPromotionTotal = $order->getOrderPromotionTotal();
+        if ($orderPromotionTotal != 0) {
+            return $this->singleLine->appendLineItems($paymentDetails, $order);
+        }
+
+        return $this->detailled->appendLineItems($paymentDetails, $order);
+    }
+
+
+
+
+    /**
+     * @param Order $order
+     * @param array $paymentDetails
+     * @return array
+     */
+    private function appendCustomerEmail(Order $order, array $paymentDetails): array
+    {
+        $email = $order->getCustomer()->getEmail();
+        if (! empty($email)) {
+            $paymentDetails['customer_email'] = $email;
+        }
+
+        return $paymentDetails;
     }
 }

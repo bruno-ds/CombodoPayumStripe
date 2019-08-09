@@ -13,14 +13,18 @@ declare(strict_types=1);
 
 namespace AppBundle\Payment;
 
+use AppBundle\Entity\Payment;
 use Combodo\StripeV3\Action\CheckoutCompletedEventAction;
+use Combodo\StripeV3\Action\CheckoutCompletedInformationProvider;
 use Combodo\StripeV3\Request\handleCheckoutCompletedEvent;
 use Payum\Core\Extension\Context;
 use Payum\Core\Extension\ExtensionInterface;
 use Payum\Core\Payum;
 use Payum\Core\Security\HttpRequestVerifierInterface;
+use Payum\Core\Security\TokenInterface;
 use Psr\Log\LoggerInterface;
 use SM\Factory\FactoryInterface;
+use Sylius\Bundle\PayumBundle\Action\CapturePaymentAction;
 use Sylius\Component\Payment\Model\PaymentInterface;
 use Sylius\Component\Payment\PaymentTransitions;
 use Sylius\Component\Resource\StateMachine\StateMachineInterface;
@@ -79,15 +83,15 @@ class StripeV3UpdatePaymentStateOnCheckoutCompletedEvent implements ExtensionInt
     public function onPostExecute(Context $context): void
     {
         $action = $context->getAction();
-        if (!$action instanceof CheckoutCompletedEventAction) {
+        if (!$action instanceof CheckoutCompletedInformationProvider) {
             return;
         }
         if ($context->getException() !== null) {
             return;
         }
 
-        $token      = $action->getToken();
-        $status     = $action->getStatus();
+        $token              = $action->getToken();
+        $status             = $action->getStatus();
 
         if (empty($token) ) {
             throw new BadRequestHttpException('The token provided was not found! (see previous exceptions)');
@@ -96,31 +100,39 @@ class StripeV3UpdatePaymentStateOnCheckoutCompletedEvent implements ExtensionInt
             throw new \LogicException('The request status could not be retrieved! (see previous exceptions)');
         }
 
+
         if (! $status->isCaptured()) {
             return;//this return is pretty important!! DO NOT REMOVE IT!!!! if you do so, the user who cancels their payment will have the payment granted anyway!
         }
 
         $payment = $status->getFirstModel();
 
-        if ($payment->getState() !== PaymentInterface::STATE_COMPLETED) {
-            $this->updatePaymentState($payment, PaymentInterface::STATE_COMPLETED);
-        } else {
-            $this->logger->debug("Transition skipped", [
-                'target state'      => PaymentInterface::STATE_COMPLETED,
-                'payment object'    => $payment,
-            ]);
-        }
+        $this->runPaymentWorkflow($payment);
 
-        /** @var handleCheckoutCompletedEvent $request */
-        $request = $context->getRequest();
-        if ($request->canTokenBeInvalidated()) {
-            $this->httpRequestVerifier->invalidate($token);
+        $this->invalidateToken($context, $token);
+    }
+
+
+
+    /**
+     * @param $payment
+     */
+    private function runPaymentWorkflow($payment): void
+    {
+        if ($payment->getState() !== PaymentInterface::STATE_COMPLETED) {
+            $this->applyTransition($payment, PaymentInterface::STATE_COMPLETED);
         } else {
-            $this->logger->debug('The request asked to keep the token, it was not invalidated');
+            $this->logger->debug(
+                "Transition skipped",
+                [
+                    'target state' => PaymentInterface::STATE_COMPLETED,
+                    'payment object' => $payment,
+                ]
+            );
         }
     }
 
-    private function updatePaymentState(PaymentInterface $payment, string $nextState): void
+    private function applyTransition(PaymentInterface $payment, string $nextState): void
     {
         /** @var StateMachineInterface $stateMachine */
         $stateMachine = $this->factory->get($payment, PaymentTransitions::GRAPH);
@@ -142,4 +154,24 @@ class StripeV3UpdatePaymentStateOnCheckoutCompletedEvent implements ExtensionInt
             ]);
         }
     }
+
+
+
+    /**
+     * @param Context        $context
+     * @param TokenInterface $token
+     */
+    private function invalidateToken(Context $context, TokenInterface $token): void
+    {
+        /** @var handleCheckoutCompletedEvent $request */
+        $request = $context->getRequest();
+        if ($request->canTokenBeInvalidated()) {
+            $this->httpRequestVerifier->invalidate($token);
+        } else {
+            $this->logger->debug('The request asked to keep the token, it was not invalidated');
+        }
+    }
+
+
+
 }
